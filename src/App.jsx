@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SPOTIFY_CLIENT_ID = "0d7334c9ce2c453d9aa1f2a15d29271c"; // Replace this
+const SPOTIFY_CLIENT_ID = "YOUR_SPOTIFY_CLIENT_ID"; // Replace this
 const REDIRECT_URI = window.location.origin + "/callback";
 const SCOPES = [
   "streaming",
@@ -13,7 +13,7 @@ const SCOPES = [
   "user-read-currently-playing",
 ].join(" ");
 
-const SERVER_URL = "https://syncroom-server-xgg1.onrender.com"; // Change to your deployed server URL
+const SERVER_URL = "http://localhost:3001"; // Change to your deployed server URL
 const SYNC_INTERVAL_MS = 2000;
 const DRIFT_THRESHOLD_MS = 800;
 
@@ -34,7 +34,7 @@ async function generateCodeChallenge(verifier) {
 async function redirectToSpotify() {
   const verifier = generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
-  sessionStorage.setItem("pkce_verifier", verifier);
+  localStorage.setItem("pkce_verifier", verifier);
 
   const params = new URLSearchParams({
     client_id: SPOTIFY_CLIENT_ID,
@@ -49,7 +49,7 @@ async function redirectToSpotify() {
 }
 
 async function exchangeCodeForToken(code) {
-  const verifier = sessionStorage.getItem("pkce_verifier");
+  const verifier = localStorage.getItem("pkce_verifier");
   const res = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -106,8 +106,8 @@ async function getUserProfile(token) {
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem("sp_token") || null);
-  const [refreshTok, setRefreshTok] = useState(() => sessionStorage.getItem("sp_refresh") || null);
+  const [token, setToken] = useState(() => localStorage.getItem("sp_token") || null);
+  const [refreshTok, setRefreshTok] = useState(() => localStorage.getItem("sp_refresh") || null);
   const [user, setUser] = useState(null);
   const [page, setPage] = useState("home"); // home | lobby | room
   const [roomCode, setRoomCode] = useState("");
@@ -134,8 +134,8 @@ export default function App() {
     if (code) {
       exchangeCodeForToken(code).then((data) => {
         if (data.access_token) {
-          sessionStorage.setItem("sp_token", data.access_token);
-          sessionStorage.setItem("sp_refresh", data.refresh_token);
+          localStorage.setItem("sp_token", data.access_token);
+          localStorage.setItem("sp_refresh", data.refresh_token);
           setToken(data.access_token);
           setRefreshTok(data.refresh_token);
           window.history.replaceState({}, "", "/");
