@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SPOTIFY_CLIENT_ID = "0d7334c9ce2c453d9aa1f2a15d29271c"; // Replace this
+// CONFIG - update these two lines
+const SPOTIFY_CLIENT_ID = "0d7334c9ce2c453d9aa1f2a15d29271c";
+const SERVER_URL = "https://syncroom-server-xgg1.onrender.com";
+
 const REDIRECT_URI = window.location.origin + "/callback";
 const SCOPES = [
   "streaming",
@@ -13,11 +15,9 @@ const SCOPES = [
   "user-read-currently-playing",
 ].join(" ");
 
-const SERVER_URL = "https://syncroom-server-xgg1.onrender.com"; // Change to your deployed server URL
 const SYNC_INTERVAL_MS = 2000;
 const DRIFT_THRESHOLD_MS = 800;
 
-// ─── SPOTIFY OAUTH HELPERS ───────────────────────────────────────────────────
 function generateCodeVerifier() {
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
@@ -35,7 +35,7 @@ async function redirectToSpotify() {
   const verifier = generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
   localStorage.setItem("pkce_verifier", verifier);
-
+  console.log("Stored verifier:", verifier.slice(0, 10) + "...");
   const params = new URLSearchParams({
     client_id: SPOTIFY_CLIENT_ID,
     response_type: "code",
@@ -44,12 +44,12 @@ async function redirectToSpotify() {
     code_challenge_method: "S256",
     code_challenge: challenge,
   });
-
   window.location.href = `https://accounts.spotify.com/authorize?${params}`;
 }
 
 async function exchangeCodeForToken(code) {
   const verifier = localStorage.getItem("pkce_verifier");
+  console.log("Verifier on exchange:", verifier ? verifier.slice(0, 10) + "..." : "MISSING");
   const res = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -61,10 +61,12 @@ async function exchangeCodeForToken(code) {
       code_verifier: verifier,
     }),
   });
-  return res.json();
+  const data = await res.json();
+  console.log("Token response:", data.access_token ? "OK" : JSON.stringify(data));
+  return data;
 }
 
-async function refreshToken(refresh_token) {
+async function doRefreshToken(refresh_token) {
   const res = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -77,7 +79,6 @@ async function refreshToken(refresh_token) {
   return res.json();
 }
 
-// ─── SPOTIFY API HELPERS ─────────────────────────────────────────────────────
 async function spotifyFetch(path, token, options = {}) {
   return fetch(`https://api.spotify.com/v1${path}`, {
     ...options,
@@ -104,103 +105,101 @@ async function getUserProfile(token) {
   return res.json();
 }
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("sp_token") || null);
   const [refreshTok, setRefreshTok] = useState(() => localStorage.getItem("sp_refresh") || null);
   const [user, setUser] = useState(null);
-  const [page, setPage] = useState("home"); // home | lobby | room
+  const [page, setPage] = useState("home");
   const [roomCode, setRoomCode] = useState("");
   const [joinInput, setJoinInput] = useState("");
   const [isHost, setIsHost] = useState(false);
   const [members, setMembers] = useState([]);
   const [playback, setPlayback] = useState(null);
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | synced | drifted
+  const [syncStatus, setSyncStatus] = useState("idle");
   const [chat, setChat] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [notification, setNotification] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
   const socketRef = useRef(null);
   const syncIntervalRef = useRef(null);
 
-  const notify = (msg) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(""), 3000);
-  };
+  const notify = (msg) => { setNotification(msg); setTimeout(() => setNotification(""), 3500); };
 
-  // ── Handle OAuth callback ──
+  // Handle OAuth callback
   useEffect(() => {
     const url = new URL(window.location.href);
     const code = url.searchParams.get("code");
+    const oauthError = url.searchParams.get("error");
+
+    if (oauthError) {
+      window.history.replaceState({}, "", "/");
+      notify("Spotify login cancelled. Please try again.");
+      return;
+    }
+
     if (code) {
-      exchangeCodeForToken(code).then((data) => {
-        if (data.access_token) {
-          localStorage.setItem("sp_token", data.access_token);
-          localStorage.setItem("sp_refresh", data.refresh_token);
-          setToken(data.access_token);
-          setRefreshTok(data.refresh_token);
-          window.history.replaceState({}, "", "/");
-        }
-      });
+      window.history.replaceState({}, "", "/");
+      setAuthLoading(true);
+      exchangeCodeForToken(code)
+        .then((data) => {
+          if (data.access_token) {
+            localStorage.setItem("sp_token", data.access_token);
+            localStorage.setItem("sp_refresh", data.refresh_token);
+            setToken(data.access_token);
+            setRefreshTok(data.refresh_token);
+          } else {
+            localStorage.removeItem("pkce_verifier");
+            notify("Login failed: " + (data.error_description || data.error || "unknown"));
+          }
+        })
+        .catch((err) => { console.error(err); notify("Network error. Please try again."); })
+        .finally(() => setAuthLoading(false));
     }
   }, []);
 
-  // ── Load user profile ──
+  // Load user profile + handle expired token
   useEffect(() => {
     if (!token) return;
     getUserProfile(token).then((p) => {
-      if (p.id) setUser(p);
+      if (p.id) {
+        setUser(p);
+      } else if (p.error?.status === 401 && refreshTok) {
+        doRefreshToken(refreshTok).then((d) => {
+          if (d.access_token) {
+            localStorage.setItem("sp_token", d.access_token);
+            setToken(d.access_token);
+          } else {
+            localStorage.clear();
+            setToken(null);
+          }
+        });
+      }
     });
   }, [token]);
 
-  // ── Connect socket ──
+  // Socket
   useEffect(() => {
     const socket = io(SERVER_URL, { transports: ["websocket"] });
     socketRef.current = socket;
-
     socket.on("sync_state", async (state) => {
-      if (isHost) return; // host never follows sync
-      if (!token) return;
-      const networkDelay = (Date.now() - state.sentAt) / 2;
-      const correctedPos = state.positionMs + networkDelay + (Date.now() - state.sentAt);
-
+      if (isHost || !token) return;
+      const correctedPos = state.positionMs + (Date.now() - state.sentAt) / 2;
       const local = await getPlaybackState(token);
       if (!local) return;
-
-      const drift = Math.abs(correctedPos - local.progress_ms);
-      if (drift > DRIFT_THRESHOLD_MS) {
+      if (Math.abs(correctedPos - local.progress_ms) > DRIFT_THRESHOLD_MS) {
         await seekTo(token, correctedPos);
         setSyncStatus("synced");
         setTimeout(() => setSyncStatus("idle"), 2000);
       }
-
-      if (state.isPlaying !== local.is_playing) {
-        await setPlay(token, state.isPlaying);
-      }
+      if (state.isPlaying !== local.is_playing) await setPlay(token, state.isPlaying);
     });
-
-    socket.on("promoted_to_host", () => {
-      setIsHost(true);
-      notify("👑 You're now the host!");
-    });
-
-    socket.on("member_joined", ({ name, count }) => {
-      setMembers((m) => [...m, name]);
-      notify(`🎵 ${name} joined the room`);
-    });
-
-    socket.on("member_left", ({ name, count }) => {
-      setMembers((m) => m.filter((x) => x !== name));
-      notify(`${name} left the room`);
-    });
-
-    socket.on("chat_message", (msg) => {
-      setChat((c) => [...c.slice(-49), msg]);
-    });
-
+    socket.on("promoted_to_host", () => { setIsHost(true); notify("You are now the host!"); });
+    socket.on("member_joined", ({ name }) => { setMembers((m) => [...m, name]); notify(name + " joined"); });
+    socket.on("member_left", ({ name }) => { setMembers((m) => m.filter((x) => x !== name)); notify(name + " left"); });
+    socket.on("chat_message", (msg) => { setChat((c) => [...c.slice(-49), msg]); });
     return () => socket.disconnect();
   }, [token, isHost]);
 
-  // ── Host sync loop ──
   const startHostSync = useCallback(() => {
     if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
     syncIntervalRef.current = setInterval(async () => {
@@ -209,19 +208,14 @@ export default function App() {
       if (!state) return;
       setPlayback(state);
       socketRef.current?.emit("push_state", {
-        trackId: state.item?.id,
-        trackName: state.item?.name,
-        artist: state.item?.artists?.[0]?.name,
+        positionMs: state.progress_ms, durationMs: state.item?.duration_ms,
+        isPlaying: state.is_playing, sentAt: Date.now(),
+        trackName: state.item?.name, artist: state.item?.artists?.[0]?.name,
         albumArt: state.item?.album?.images?.[0]?.url,
-        positionMs: state.progress_ms,
-        durationMs: state.item?.duration_ms,
-        isPlaying: state.is_playing,
-        sentAt: Date.now(),
       });
     }, SYNC_INTERVAL_MS);
   }, [token]);
 
-  // ── Guest poll loop ──
   const startGuestPoll = useCallback(() => {
     if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
     syncIntervalRef.current = setInterval(async () => {
@@ -233,38 +227,22 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
-    if (page !== "room") {
-      clearInterval(syncIntervalRef.current);
-      return;
-    }
-    if (isHost) startHostSync();
-    else startGuestPoll();
+    if (page !== "room") { clearInterval(syncIntervalRef.current); return; }
+    if (isHost) startHostSync(); else startGuestPoll();
     return () => clearInterval(syncIntervalRef.current);
   }, [page, isHost, startHostSync, startGuestPoll]);
 
-  // ── Actions ──
   const createRoom = () => {
     socketRef.current.emit("create_room", { displayName: user?.display_name || "Host" }, (res) => {
-      if (res.success) {
-        setRoomCode(res.roomCode);
-        setIsHost(true);
-        setMembers([user?.display_name || "Host"]);
-        setPage("room");
-      }
+      if (res.success) { setRoomCode(res.roomCode); setIsHost(true); setMembers([user?.display_name || "Host"]); setPage("room"); }
     });
   };
 
   const joinRoom = () => {
     if (!joinInput.trim()) return;
     socketRef.current.emit("join_room", { roomCode: joinInput, displayName: user?.display_name || "Guest" }, (res) => {
-      if (res.success) {
-        setRoomCode(res.roomCode);
-        setIsHost(false);
-        setMembers(res.members || []);
-        setPage("room");
-      } else {
-        notify("❌ " + res.error);
-      }
+      if (res.success) { setRoomCode(res.roomCode); setIsHost(false); setMembers(res.members || []); setPage("room"); }
+      else notify("Error: " + res.error);
     });
   };
 
@@ -276,49 +254,40 @@ export default function App() {
 
   const leaveRoom = () => {
     clearInterval(syncIntervalRef.current);
-    socketRef.current.disconnect();
-    socketRef.current.connect();
-    setPage("home");
-    setRoomCode("");
-    setIsHost(false);
-    setMembers([]);
-    setChat([]);
-    setPlayback(null);
+    socketRef.current.disconnect(); socketRef.current.connect();
+    setPage("home"); setRoomCode(""); setIsHost(false); setMembers([]); setChat([]); setPlayback(null);
   };
 
-  // ─── RENDER ───────────────────────────────────────────────────────────────
+  const logout = () => {
+    localStorage.clear(); setToken(null); setUser(null);
+  };
+
   return (
     <div className="app">
       {notification && <div className="toast">{notification}</div>}
 
       {!token && (
         <div className="screen center">
-          <div className="logo">◎ SyncRoom</div>
+          <div className="logo">SyncRoom</div>
           <p className="tagline">Listen together, in perfect sync.</p>
-          <button className="btn-green" onClick={redirectToSpotify}>
-            Connect Spotify
-          </button>
+          {authLoading
+            ? <div className="loading">Connecting to Spotify...</div>
+            : <button className="btn-green" onClick={redirectToSpotify}>Connect Spotify</button>
+          }
         </div>
       )}
 
       {token && page === "home" && (
         <div className="screen center">
-          <div className="logo">◎ SyncRoom</div>
-          {user && <div className="user-badge">👤 {user.display_name}</div>}
+          <div className="logo">SyncRoom</div>
+          {user && <div className="user-badge">{user.display_name} <span className="logout" onClick={logout}>Log out</span></div>}
           <div className="card">
-            <button className="btn-green" onClick={createRoom}>
-              🎵 Create Room
-            </button>
+            <button className="btn-green" onClick={createRoom}>Create Room</button>
             <div className="divider">or</div>
             <div className="join-row">
-              <input
-                className="input"
-                placeholder="Room code (e.g. ABC123)"
-                value={joinInput}
+              <input className="input" placeholder="Room code" value={joinInput}
                 onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
-                onKeyDown={(e) => e.key === "Enter" && joinRoom()}
-                maxLength={6}
-              />
+                onKeyDown={(e) => e.key === "Enter" && joinRoom()} maxLength={6} />
               <button className="btn-white" onClick={joinRoom}>Join</button>
             </div>
           </div>
@@ -328,16 +297,13 @@ export default function App() {
       {token && page === "room" && (
         <div className="screen room">
           <header className="room-header">
-            <div className="room-code">
-              Room: <strong>{roomCode}</strong>
-              <span className="copy-btn" onClick={() => { navigator.clipboard.writeText(roomCode); notify("Copied!"); }}>📋</span>
+            <div className="room-code">Room: <strong>{roomCode}</strong>
+              <span className="copy-btn" onClick={() => { navigator.clipboard.writeText(roomCode); notify("Copied!"); }}>Copy</span>
             </div>
-            <div className="badge">{isHost ? "👑 Host" : "🎧 Guest"}</div>
+            <div className="badge">{isHost ? "Host" : "Guest"}</div>
             <button className="btn-leave" onClick={leaveRoom}>Leave</button>
           </header>
-
           <div className="room-body">
-            {/* Now Playing */}
             <div className="now-playing">
               {playback?.item ? (
                 <>
@@ -346,51 +312,27 @@ export default function App() {
                     <div className="track-name">{playback.item.name}</div>
                     <div className="track-artist">{playback.item.artists?.[0]?.name}</div>
                     <div className="progress-bar">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${(playback.progress_ms / playback.item.duration_ms) * 100}%` }}
-                      />
+                      <div className="progress-fill" style={{ width: `${(playback.progress_ms / playback.item.duration_ms) * 100}%` }} />
                     </div>
-                    <div className="sync-status">
-                      {isHost ? "🎙 Broadcasting" : syncStatus === "synced" ? "✅ Synced" : "🔄 Listening"}
-                    </div>
+                    <div className="sync-status">{isHost ? "Broadcasting" : syncStatus === "synced" ? "Synced" : "Listening"}</div>
                   </div>
                 </>
               ) : (
-                <div className="no-track">
-                  {isHost ? "▶ Start playing something on Spotify!" : "⏳ Waiting for host to play..."}
-                </div>
+                <div className="no-track">{isHost ? "Play something on Spotify to start broadcasting" : "Waiting for host to play..."}</div>
               )}
             </div>
-
-            {/* Members */}
             <div className="members">
               <div className="section-title">Listeners ({members.length})</div>
-              <div className="member-list">
-                {members.map((m, i) => (
-                  <div key={i} className="member-chip">{m}</div>
-                ))}
-              </div>
+              <div className="member-list">{members.map((m, i) => <div key={i} className="member-chip">{m}</div>)}</div>
             </div>
-
-            {/* Chat */}
             <div className="chat-panel">
               <div className="section-title">Chat</div>
               <div className="chat-messages">
-                {chat.map((m, i) => (
-                  <div key={i} className="chat-msg">
-                    <span className="chat-name">{m.name}</span> {m.text}
-                  </div>
-                ))}
+                {chat.map((m, i) => <div key={i} className="chat-msg"><span className="chat-name">{m.name}</span> {m.text}</div>)}
               </div>
               <div className="chat-input-row">
-                <input
-                  className="input"
-                  placeholder="Say something..."
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && sendChat()}
-                />
+                <input className="input" placeholder="Say something..." value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendChat()} />
                 <button className="btn-white" onClick={sendChat}>Send</button>
               </div>
             </div>
