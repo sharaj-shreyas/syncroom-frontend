@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SPOTIFY_CLIENT_ID = "YOUR_SPOTIFY_CLIENT_ID"; // Replace this
+const SPOTIFY_CLIENT_ID = "0d7334c9ce2c453d9aa1f2a15d29271c"; // Replace this
 const REDIRECT_URI = window.location.origin + "/callback";
 const SCOPES = [
   "streaming",
@@ -13,7 +13,7 @@ const SCOPES = [
   "user-read-currently-playing",
 ].join(" ");
 
-const SERVER_URL = "http://localhost:3001"; // Change to your deployed server URL
+const SERVER_URL = "https://syncroom-server-xgg1.onrender.com"; // Change to your deployed server URL
 const SYNC_INTERVAL_MS = 2000;
 const DRIFT_THRESHOLD_MS = 800;
 
